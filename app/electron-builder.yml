@@ -1,0 +1,19 @@
+appId: com.aetherai.app
+productName: AetherAI
+copyright: Copyright © 2024
+directories:
+  output: release
+  buildResources: resources
+files:
+  - electron/**/*
+  - dist/**/*
+  - package.json
+win:
+  target:
+    - nsis
+  icon: resources/icon.png
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: resources/icon.png
+  uninstallerIcon: resources/icon.png

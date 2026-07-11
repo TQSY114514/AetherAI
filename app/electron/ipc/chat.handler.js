@@ -1,0 +1,219 @@
+const { streamChat, completeChat } = require('../llm/providerAdapter')
+const { runToolLoop } = require('../llm/toolLoop')
+const { buildReasoningParams } = require('../llm/reasoning')
+
+// Per-request abort controllers to avoid race conditions
+const abortControllers = new Map()
+
+function registerChatHandlers(ipcMain, db, getWebContents) {
+  ipcMain.handle('chat:send', async (event, { sessionId, content, modelId, mode = 'normal', regenerate = false, personaId = null, attachments = [], useTools = false, effortLevel = 'off' }) => {
+    // Save user message
+    if (!regenerate) { db.addMessage({ session_id: sessionId, role: 'user', content }) }
+    db.touchSession(sessionId)
+
+    // Get model & provider
+    const model = db.getModel(modelId)
+    if (!model) {
+      db.addMessage({ session_id: sessionId, role: 'assistant', content: '错误: 模型未找到', status: 'error' })
+      getWebContents()?.send('chat:stream-chunk', { messageId: 0, delta: '', done: true, sessionId })
+      return { messageId: 0 }
+    }
+    const provider = db.getProvider(model.provider_id)
+    if (!provider) {
+      db.addMessage({ session_id: sessionId, role: 'assistant', content: '错误: 供应商未找到', status: 'error' })
+      getWebContents()?.send('chat:stream-chunk', { messageId: 0, delta: '', done: true, sessionId })
+      return { messageId: 0 }
+    }
+
+    // Build fallback chain
+    const fallbackModels = [{ model, provider }]
+    const chain = db.getFallbackChain(model.provider_id)
+    for (const m of chain) {
+      if (m.id !== modelId) fallbackModels.push({ model: m, provider })
+    }
+
+    // Get conversation history
+    const msgs = db.getMessages(sessionId)
+    const apiMsgs = msgs.filter(m => m.role !== 'system').map(m => ({ role: m.role, content: m.content }))
+    // Attach images to the latest user message as OpenAI-compatible multimodal content.
+    if (attachments.length > 0) {
+      const lastUserIdx = apiMsgs.map(m => m.role).lastIndexOf('user')
+      if (lastUserIdx >= 0) {
+        const parts = []
+        const text = String(apiMsgs[lastUserIdx].content || '')
+        // Some providers reject an empty-string text part, so only include it when non-empty.
+        if (text) parts.push({ type: 'text', text })
+        for (const a of attachments) {
+          if (a.mime && a.mime.startsWith('image/')) {
+            parts.push({ type: 'image_url', image_url: { url: a.dataUrl } })
+          }
+        }
+        if (parts.length > 0) apiMsgs[lastUserIdx].content = parts
+      }
+    }
+    // If persona is set, prepend system message (read from session config stored in db)
+    const session = db.getSessions().find(s => s.id === sessionId)
+    if (personaId) {
+    const p2 = db.getPersona(personaId)
+    if (p2) apiMsgs.unshift({ role: 'system', content: p2.prompt })
+  } else if (session && session.persona_id) {
+      const p = db.getPersona(session.persona_id)
+      if (p) apiMsgs.unshift({ role: 'system', content: p.prompt })
+    }
+
+    // Auto-title: defer to a real AI summary after the first response (see below).
+    // Previously this slice()d the raw user input into the title (a copy-paste,
+    // not a summary). Leaving a neutral default until the summary is generated.
+
+    const timeoutMs = parseInt(db.getSetting('fallback_timeout_ms') || '30000', 10)
+    let lastError = null
+
+    // Tool-calling path: when the session has tools enabled, run a non-streaming
+    // tool loop (detect tool_calls → run built-in tools → re-request). Each tool
+    // invocation is streamed to the UI as a tool-call block; the final text is
+    // then delivered as the assistant message. Falls through to the normal
+    // streaming path when useTools is false.
+    if (useTools) {
+      const asstMsg = db.addMessage({ session_id: sessionId, role: 'assistant', content: '', model_used: model.model_name, provider_used: provider.id, status: 'success' })
+      const msgId = asstMsg.lastInsertRowid
+      const controller = new AbortController()
+      abortControllers.set(msgId, controller)
+      const wc = getWebContents()
+      try {
+        const reasoningOpts = buildReasoningParams(model.model_name, effortLevel)
+        const finalContent = await runToolLoop({
+          provider, model, messages: apiMsgs, signal: controller.signal,
+          options: reasoningOpts,
+          onToolCall: (entry) => wc?.send('chat:tool-call', { messageId: msgId, sessionId, tool: entry }),
+        })
+        const tokens = estimateTokens(finalContent)
+        db.updateMessage(msgId, { content: finalContent, status: 'success', token_count: tokens })
+        if (msgs.length === 1) await generateSummaryTitle({ sessionId, content, fullContent: finalContent, model, provider })
+        wc?.send('chat:stream-chunk', { messageId: msgId, delta: finalContent, done: false, sessionId })
+        wc?.send('chat:stream-chunk', { messageId: msgId, delta: '', done: true, sessionId })
+        abortControllers.delete(msgId)
+        return { messageId: msgId }
+      } catch (err) {
+        abortControllers.delete(msgId)
+        const errMsg = err.name === 'AbortError' ? '已中止' : (err.message || String(err))
+        db.updateMessage(msgId, { content: '', status: 'aborted', error_message: errMsg })
+        wc?.send('chat:stream-chunk', { messageId: msgId, delta: '', done: true, sessionId })
+        return { messageId: msgId }
+      }
+    }
+
+    for (let i = 0; i < fallbackModels.length; i++) {
+      const { model: m, provider: p } = fallbackModels[i]
+      const isFallback = i > 0
+
+      const asstMsg = db.addMessage({
+        session_id: sessionId, role: 'assistant', content: '',
+        model_used: m.model_name, provider_used: p.id, status: isFallback ? 'fallback' : 'success',
+      })
+      const msgId = asstMsg.lastInsertRowid
+
+      const controller = new AbortController()
+      abortControllers.set(msgId, controller)
+      const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+      try {
+        let fullContent = ''
+        const wc = getWebContents()
+        // Reasoning params (reasoning_effort / thinking.budget_tokens) are spread
+        // into the request body by the adapter via `options`.
+        const reasoningOpts = buildReasoningParams(m.model_name, effortLevel)
+        for await (const delta of streamChat({ provider: p, model: m, messages: apiMsgs, signal: controller.signal, options: reasoningOpts })) {
+          if (delta) {
+            fullContent += delta
+            wc?.send('chat:stream-chunk', { messageId: msgId, delta, done: false, sessionId })
+          }
+        }
+        clearTimeout(timeout)
+        abortControllers.delete(msgId)
+
+        // Save to DB FIRST, then send done signal
+        const tokens = estimateTokens(fullContent)
+      db.updateMessage(msgId, {
+        content: fullContent,
+        status: isFallback ? 'fallback' : 'success',
+        token_count: tokens,
+      })
+      // Auto-title: summarize the first exchange instead of copy-pasting raw input.
+      if (msgs.length === 1) {
+        await generateSummaryTitle({ sessionId, content, fullContent, model: m, provider: p })
+      }
+      console.log('[AetherAI] DB write', msgId, 'len=', fullContent.length, 'tokens=', tokens)
+      wc?.send('chat:stream-chunk', { messageId: msgId, delta: '', done: true, sessionId })
+
+      return { messageId: msgId }
+
+      } catch (err) {
+        clearTimeout(timeout)
+        abortControllers.delete(msgId)
+        if (err.name === 'AbortError') {
+          db.updateMessage(msgId, { content: '', status: 'aborted', error_message: '已中止' })
+          getWebContents()?.send('chat:stream-chunk', { messageId: msgId, delta: '', done: true, sessionId })
+          return { messageId: msgId }
+        }
+        lastError = err.message
+        db.updateMessage(msgId, { content: '', status: 'error', error_message: lastError })
+        // Retry on rate-limit / server errors or transient network errors.
+        const retryStatus = [429, 500, 502, 503, 504].includes(err.status)
+        const isRetryable = retryStatus || err.message.includes('ECONNREFUSED') || err.message.includes('ECONNRESET') ||
+          err.message.includes('ENOTFOUND') || err.message.includes('ETIMEDOUT')
+        if (isRetryable && i < fallbackModels.length - 1) continue
+        break
+      }
+    }
+
+    if (lastError) getWebContents()?.send('chat:stream-chunk', { messageId: 0, delta: '', done: true, sessionId })
+    return { messageId: 0 }
+  })
+
+  ipcMain.handle('chat:stop', () => {
+    for (const [id, controller] of abortControllers) {
+      controller.abort()
+    }
+    abortControllers.clear()
+  })
+}
+
+// Generate a concise, summarized title for a session's first exchange.
+// Asks the model for a short topic phrase (e.g. asking "新约能天使值不值得抽"
+// → "新约能天使抽取建议"). Falls back to a truncated version of the user's input
+// if the summary call fails or returns nothing useful. Never throws.
+async function generateSummaryTitle({ sessionId, content, fullContent, model, provider }) {
+  const fallback = (content || '新对话').replace(/\s+/g, ' ').trim().slice(0, 30)
+  let title = fallback
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15000)
+    const text = await completeChat({
+      provider, model,
+      messages: [
+        { role: 'system', content: '你是会话主题提炼器。用一个简短的主题短语概括用户的核心诉求，4-12个字，像一个小标题。不要句号、引号、前缀或解释。示例：用户问"新约能天使值不值得抽"→"新约能天使抽取建议"；用户问"这段Python代码为什么报错"→"Python代码排错"；用户问"帮我写一封请假邮件"→"撰写请假邮件"。' },
+        { role: 'user', content: `用户：${content}\n\n助手：${(fullContent || '').slice(0, 800)}` },
+      ],
+      signal: controller.signal,
+      options: { max_tokens: 30, temperature: 0.2 },
+    })
+    clearTimeout(timeout)
+    const cleaned = (text || '').trim().replace(/^["“『]|["”』]$/g, '').replace(/[。.!！？?]/g, '').trim()
+    if (cleaned) title = cleaned.slice(0, 20)
+  } catch {
+    // network / abort / parse error — keep the fallback
+  }
+  try { db.renameSession(sessionId, title) } catch {}
+}
+
+function estimateTokens(text) {
+  if (!text) return 0
+  let tokens = 0
+  for (const c of text) {
+    if (c >= '一' && c <= '鿿') tokens += 1.5
+    else tokens += 0.25
+  }
+  return Math.max(1, Math.ceil(tokens))
+}
+
+module.exports = { registerChatHandlers }

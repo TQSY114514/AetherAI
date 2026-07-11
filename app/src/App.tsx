@@ -1,0 +1,137 @@
+import { useEffect, useCallback, useRef } from 'react'
+import { useStore } from '@/store'
+import Sidebar from '@/components/sidebar/Sidebar'
+import ChatPage from '@/pages/ChatPage'
+import ModelPage from '@/pages/ModelPage'
+import PersonaPage from '@/pages/PersonaPage'
+import SettingPage from '@/pages/SettingPage'
+import ScoresPage from '@/pages/ScoresPage'
+import TokenPage from '@/pages/TokenPage'
+import MemoryPage from '@/pages/MemoryPage'
+import { t } from '@/utils/i18n'
+
+export default function App() {
+  const currentView = useStore((s) => s.currentView)
+  const setCurrentView = useStore((s) => s.setCurrentView)
+  const createSession = useStore((s) => s.createSession)
+  const sidebarOpen = useStore((s) => s.sidebarOpen)
+  const loadProviders = useStore((s) => s.loadProviders)
+  const loadSessions = useStore((s) => s.loadSessions)
+  const loadPersonas = useStore((s) => s.loadPersonas)
+  const loadScores = useStore((s) => s.loadScores)
+  const loadAllModels = useStore((s) => s.loadAllModels)
+  const loadSettings = useStore((s) => s.loadSettings)
+  const loadModels = useStore((s) => s.loadModels)
+  const selectSession = useStore((s) => s.selectSession)
+  const sessions = useStore((s) => s.sessions)
+  const currentSessionId = useStore((s) => s.currentSessionId)
+  const mainRef = useRef<HTMLDivElement>(null)
+  const backgroundImage = useStore((s) => s.backgroundImage)
+  const backgroundOpacity = useStore((s) => s.backgroundOpacity)
+  const backgroundBlur = useStore((s) => s.backgroundBlur)
+  const hasBg = backgroundImage !== null
+
+  // Window-level overscroll spring bounce: F = -k*off - b*vel
+  useEffect(() => {
+    const root = document.getElementById('root')
+    if (!root) return
+    let off = 0, vel = 0, act = false
+    const tick = () => {
+      if (!act) return
+      const f = -0.04 * off - 0.72 * vel
+      vel += f; off += vel
+      if (Math.abs(off) < 0.5 && Math.abs(vel) < 0.5) {
+        act = false; off = 0; vel = 0
+        root.style.transform = ''
+        return
+      }
+      root.style.transform = `translateY(${off}px)`
+      requestAnimationFrame(tick)
+    }
+    const kick = (v: number) => {
+      vel += v; if (!act) { act = true; requestAnimationFrame(tick) }
+    }
+    const onWheel = (e: WheelEvent) => {
+      const scroller = (e.target as HTMLElement).closest('[class*="overflow-y-auto"], .scroll-bounce')
+      if (scroller) {
+        const el = scroller as HTMLElement
+        if ((el.scrollTop <= 0 && e.deltaY < 0) || (el.scrollTop + el.clientHeight >= el.scrollHeight - 1 && e.deltaY > 0)) {
+          e.preventDefault(); kick(e.deltaY * 0.06)
+        }
+      }
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => window.removeEventListener('wheel', onWheel)
+  }, [])
+
+  useEffect(() => {
+    const init = async () => {
+      await loadSettings()
+      await loadProviders()
+      await loadSessions()
+      await loadPersonas()
+      await loadScores()
+      await loadAllModels()
+      const providers = useStore.getState().providers
+      for (const p of providers) {
+        await loadModels(p.id)
+      }
+      // Auto-select first session if none selected
+      const s = useStore.getState().sessions
+      if (s.length > 0 && !useStore.getState().currentSessionId) {
+        await selectSession(s[0].id)
+      }
+    }
+    init()
+  }, [])
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault()
+        createSession()
+        setCurrentView('chat')
+      }
+      if (e.key === 'Escape' && currentView !== 'chat') {
+        setCurrentView('chat')
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [currentView, createSession, setCurrentView])
+
+  const renderPage = () => {
+    switch (currentView) {
+      case 'chat': return <ChatPage />
+      case 'models': return <ModelPage />
+      case 'agents': return <PersonaPage />
+      case 'settings': return <SettingPage />
+      case 'scores': return <ScoresPage />
+      case 'tokens': return <TokenPage />
+      case 'memory': return <MemoryPage />
+    }
+  }
+
+  return (
+    <div ref={mainRef} className="flex h-full w-full" style={{ backgroundColor: hasBg ? 'transparent' : 'var(--bg-primary)', color: 'var(--text-primary)' }}>
+      {hasBg && (
+        <div aria-hidden className="fixed inset-0 pointer-events-none"
+          style={{
+            zIndex: 0,
+            backgroundImage: `url("${backgroundImage}")`,
+            backgroundSize: 'cover',
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+            filter: backgroundBlur > 0 ? `blur(${backgroundBlur}px)` : undefined,
+            opacity: backgroundOpacity / 100,
+            transform: backgroundBlur > 0 ? 'scale(1.05)' : undefined, // avoid blurred edge gaps
+          }} />
+      )}
+      {sidebarOpen && <Sidebar />}
+      <main className="flex-1 flex flex-col min-w-0 relative" style={{ zIndex: 1 }}>
+        {renderPage()}
+      </main>
+    </div>
+  )
+}
