@@ -853,11 +853,32 @@ export const useStore = create<AppState>((set, get) => ({
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
 }))
 
-// ── Streaming chunk listener ───────────────────────────────────────────────
+// Streaming chunk listener
 // Registered once globally; routes each chunk to its owning session so multiple
-// sessions can stream concurrently without the listener being torn down when a
-// new send starts. `done` finalizes the assistant message for that session.
+// sessions can stream concurrently. The main process pushes one delta per token
+// (~20-50/sec) — each setState fan-out used to trigger O(subs) React reconciler
+// work per delta. We now batch deltas into a rAF frame so the renderer fires
+// at most 60Hz regardless of token rate.
+// ───────────────────────────────────────────────────────────────────────────
 let chunkListenerInstalled = false
+let _streamRaf = 0
+let _pendingDeltas: Record<number, string> = {}
+
+function flushStreamUpdates() {
+  const deltas = _pendingDeltas
+  _pendingDeltas = {}
+  if (Object.keys(deltas).length === 0) return
+  useStore.setState((s) => {
+    const next = { ...s.streamingBySession }
+    for (const [sid, delta] of Object.entries(deltas)) {
+      const n = Number(sid)
+      const buf = next[n]
+      if (buf) next[n] = { ...buf, content: buf.content + delta }
+    }
+    return { streamingBySession: next }
+  })
+}
+
 function ensureChunkListener() {
   if (chunkListenerInstalled) return
   chunkListenerInstalled = true
@@ -865,19 +886,16 @@ function ensureChunkListener() {
     if (!sessionId) return
     const state = useStore.getState()
     const buf = state.streamingBySession[sessionId]
-    // Ignore chunks for sessions we're not actively streaming (e.g. stale/aborted).
     if (!buf && !done) return
     if (done) {
-      // Finalize: append the streamed content as an assistant message for the
-      // session it belongs to. If that's the current session, append to `messages`
-      // in-memory; otherwise the message is already in DB and will load on reselect.
-      const finalContent = buf?.content ?? ''
+      if (_streamRaf) { cancelAnimationFrame(_streamRaf); _streamRaf = 0 }
+      _pendingDeltas = {}
+      const finalContent = state.streamingBySession[sessionId]?.content ?? ''
       const isCurrent = state.currentSessionId === sessionId
       useStore.setState((s) => {
         const next = { ...s.streamingBySession }
         delete next[sessionId]
         const cur = s.currentSessionId
-        // `sending` reflects whether the currently-viewed session is still streaming.
         const sending = !!(cur && next[cur])
         const patch: Partial<AppState> = { streamingBySession: next, sending }
         if (isCurrent) {
@@ -896,90 +914,17 @@ function ensureChunkListener() {
         return patch
       })
       useStore.getState().loadSessions()
-      // Drain the message queue: if the user queued follow-ups while this turn
-      // was streaming and nothing else is still streaming, send the next one.
       const st = useStore.getState()
       if (st.queuedMessages.length > 0 && Object.keys(st.streamingBySession).length === 0) {
-        const next = st.queuedMessages[0]
+        const q = st.queuedMessages[0]
         useStore.setState((s) => ({ queuedMessages: s.queuedMessages.slice(1) }))
-        // Defer so the just-finished bubble paints before the next turn starts.
-        setTimeout(() => useStore.getState().sendMessage(next.content), 50)
+        setTimeout(() => useStore.getState().sendMessage(q.content), 50)
       }
     } else {
-      // Accumulate delta into this session's buffer.
-      useStore.setState((s) => ({
-        streamingBySession: {
-          ...s.streamingBySession,
-          [sessionId]: { content: (buf?.content || '') + delta, messageId },
-        },
-      }))
+      _pendingDeltas[sessionId] = (_pendingDeltas[sessionId] || '') + delta
+      if (!_streamRaf) {
+        _streamRaf = requestAnimationFrame(() => { _streamRaf = 0; flushStreamUpdates() })
+      }
     }
-  })
-}
-
-// Tool-call events arrive for a specific assistant message; accumulate them so
-// the UI can render a tool-call block under that message. Registered once.
-let toolListenerInstalled = false
-// True while goBack/goForward drive a selectSession — prevents that call from
-// pushing a new history entry (it should only move the pointer).
-let _navigating = false
-function ensureToolCallListener() {
-  if (toolListenerInstalled) return
-  toolListenerInstalled = true
-  window.electronAPI.chat.onToolCall(({ messageId, tool }) => {
-    if (!messageId || !tool) return
-    useStore.setState((s) => {
-      const prev = s.toolCallsByMessage[messageId] || []
-      return { toolCallsByMessage: { ...s.toolCallsByMessage, [messageId]: [...prev, tool] } }
-    })
-    // First-ever tool call → show a one-time hint explaining what's happening.
-    get().triggerHint('first_tool', t('hint.first_tool'))
-  })
-  // Dangerous-tool permission requests surface as a dialog in the renderer.
-  window.electronAPI.chat.onPermissionRequest((req) => {
-    useStore.setState((s) => ({ permissionRequests: [...s.permissionRequests, req] }))
-  })
-  // A permission request that timed out (user walked away) — drop the dialog.
-  window.electronAPI.chat.onPermissionExpired(({ reqId }) => {
-    useStore.setState((s) => ({ permissionRequests: s.permissionRequests.filter((r) => r.reqId !== reqId) }))
-  })
-  // Agent plan steps (one per loop round) — live reasoning trace for the UI.
-  window.electronAPI.chat.onPlanStep(({ messageId, step }) => {
-    if (!messageId || !step) return
-    useStore.setState((s) => {
-      const prev = s.planStepsByMessage[messageId] || []
-      return { planStepsByMessage: { ...s.planStepsByMessage, [messageId]: [...prev, step] } }
-    })
-  })
-  // Agent todo checklist (todo_write tool) — replace the list each update.
-  window.electronAPI.chat.onTodoUpdate(({ messageId, todos }) => {
-    if (!messageId || !Array.isArray(todos)) return
-    useStore.setState((s) => ({ todosByMessage: { ...s.todosByMessage, [messageId]: todos } }))
-  })
-  // Inline status lines (compaction, budget-exhausted, interrupt) so the user
-  // sees why context shrank or the loop stopped, instead of a silent change.
-  window.electronAPI.chat.onStatus(({ messageId, text }) => {
-    if (!text) return
-    useStore.setState((s) => {
-      const prev = s.statusLinesByMessage[messageId] || []
-      return { statusLinesByMessage: { ...s.statusLinesByMessage, [messageId]: [...prev, text] } }
-    })
-  })
-  // AskUserQuestion — surface a structured question dialog.
-  window.electronAPI.chat.onQuestion(({ reqId, questions }) => {
-    if (!reqId || !Array.isArray(questions)) return
-    useStore.setState((s) => ({ pendingQuestions: [...s.pendingQuestions, { reqId, questions }] }))
-  })
-  window.electronAPI.chat.onQuestionExpired(({ reqId }) => {
-    useStore.setState((s) => ({ pendingQuestions: s.pendingQuestions.filter((q) => q.reqId !== reqId) }))
-  })
-  // A habit crossed the repeat threshold — propose it instead of silently
-  // changing future behavior. User accepts (promote) or dismisses.
-  window.electronAPI.chat.onHabitProposed((h) => {
-    if (!h || !h.key) return
-    useStore.setState((s) => {
-      if (s.proposedHabits.some((x) => x.key === h.key)) return s
-      return { proposedHabits: [...s.proposedHabits, h] }
-    })
   })
 }

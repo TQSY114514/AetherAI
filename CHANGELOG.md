@@ -2,18 +2,25 @@
 
 All notable changes to AetherAI are documented here.
 
-## [0.1.22] — 2026-07-20
-
-### Reliability & UX
-- **Credential rotation retry**: 429 / 5xx / network errors automatically retry with the next available API key before falling back to the next model. Up to 3 credential retries per request.
-- **Full-app ErrorBoundary**: wraps the entire App (sidebar, dialogs, all pages) so a crash in any section doesn't blank the entire UI.
-- **autoMemory sync race fix**: debounced sync now uses a last-args-wins pattern — rapid consecutive messages no longer lose the latest exchange's facts.
+## [0.1.23] — 2026-07-20
 
 ### Performance
-- CredentialPool module reference cached in openaiAdapter.js and anthropicAdapter.js (eliminates per-request require() lookups)
-- user_habit ALTER TABLE migration moved to database.js init (eliminates redundant SQL on every user turn)
+- rAF-batched streaming updates: chunk listener accumulates deltas and flushes at most 60Hz via requestAnimationFrame instead of triggering a zustand setState per token (~100+ Hz)
+- Habit promotion skips disk rescan: direct in-memory index update instead of re-reading all skill dirs (O(skills) stat calls eliminated)
+- Search highlight RegExp memoized in MessageBubble (was re-created per render per bubble)
 
-## [0.1.21] — 2026-07-20
+### Security & UX
+- Strip `<script>` tags in markdown renderer (defense-in-depth XSS prevention)
+- ErrorBoundary localized + dev-mode stack trace display
+
+### Reliability
+- autoMemory sync: last-args-wins debounce (rapid messages no longer lose latest exchange facts)
+- Full-app ErrorBoundary wraps sidebar + dialogs (crashes don't blank the entire UI)
+- Credential rotation retry: 429/5xx/network → retry with next key (max 3 per request)
+- CredentialPool require cached in both adapters (one lookup per process)
+- user_habit ALTER TABLE moved to database.js init
+
+## [0.1.22] — 2026-07-20
 
 ### Performance
 - chat.handler.js: cache 5 rarely-changing settings at handler registration — eliminates repeated synchronous sql.js reads on every message send

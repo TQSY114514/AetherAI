@@ -155,8 +155,9 @@ ${body}
 
 (These were learned automatically. Edit or delete via Settings → Skills if any are wrong.)`
     fs.writeFileSync(path.join(skillsDir, 'SKILL.md'), md, 'utf8')
-    // Re-scan so the new/updated skill is live in the system prompt immediately.
-    try { require('./skills').scanSkills() } catch {}
+    // Invalidate the in-memory skills index for the user-habits entry instead of
+    // re-scanning all skill dirs from disk (which is O(skills) stat calls).
+    try { require('./skills').upsertSkill('user-habits', { name: 'user-habits', description: 'Updated user habits', filePath: path.join(skillsDir, 'SKILL.md'), baseDir: skillsDir, body: md }) } catch {}
   } catch (e) {
     console.warn('[habitLearner] promote failed:', e && e.message)
   }

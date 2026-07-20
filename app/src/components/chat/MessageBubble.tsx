@@ -1,4 +1,4 @@
-import { useState, memo } from 'react'
+import { useState, memo, useMemo } from 'react'
 import { useStore } from '@/store'
 import type { Message } from '@/types'
 import { cn } from '@/lib/utils'
@@ -27,6 +27,10 @@ function MessageBubble({ message, searchHighlight }: { message: Message; searchH
   const isError = message.status === 'error'
   const isFallback = message.status === 'fallback'
   const isAborted = message.status === 'aborted'
+
+  // Memoize the search-highlight regex so it's only re-created when the query
+  // changes, not on every render for every visible bubble.
+  const hlRe = useMemo(() => searchHighlight ? new RegExp(`(${escapeRegex(searchHighlight)})`, 'gi') : null, [searchHighlight])
 
   const handleCopy = () => {
     navigator.clipboard.writeText(message.content)
@@ -88,9 +92,12 @@ function MessageBubble({ message, searchHighlight }: { message: Message; searchH
       return <>{before}<mark className="px-0.5 rounded" style={{ backgroundColor: 'var(--accent)', color: '#fff' }}>{match}</mark>{after}</>
     }
     const html = renderMarkdown(text)
-    const highlighted = html.replace(new RegExp(`(${escapeRegex(searchHighlight)})`, 'gi'),
-      '<mark class="search-hl" style="background:var(--accent);color:#fff;border-radius:2px;padding:0 1px">$1</mark>')
-    return <div className="mc" dangerouslySetInnerHTML={{ __html: highlighted }} />
+    if (hlRe) {
+      const highlighted = html.replace(hlRe,
+        '<mark class="search-hl" style="background:var(--accent);color:#fff;border-radius:2px;padding:0 1px">$1</mark>')
+      return <div className="mc" dangerouslySetInnerHTML={{ __html: highlighted }} />
+    }
+    return <div className="mc" dangerouslySetInnerHTML={{ __html: html }} />
   }
 
   return (

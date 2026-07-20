@@ -92,6 +92,10 @@ function getSkills() { return Array.from(_skills.values()) }
 function getSkillBody(name) { return _skills.get(name)?.body || null }
 function getSkill(name) { return _skills.get(name) || null }
 
+// Add or replace a single skill in the in-memory index without a disk rescan.
+// Used by habitLearner.promoteToSkill to refresh the user-habits entry in O(1).
+function upsertSkill(name, skill) { _skills.set(name, skill) }
+
 // Build the <available_skills> system-prompt block. Only name + description
 // appear (progressive-disclosure level 1). The use_skill tool loads the body.
 // Compact the home-dir prefix to ~ to save tokens (from OpenClaw's
@@ -107,4 +111,4 @@ function formatSkillsForPrompt() {
   return `<available_skills>\nThe following skills are available. When the user's request matches a skill's description, call the use_skill tool with the skill name to load its full instructions, then follow them. Only load a skill when it is relevant to the task.\n${items}\n</available_skills>`
 }
 
-module.exports = { scanSkills, getSkills, getSkill, getSkillBody, formatSkillsForPrompt, parseFrontmatter }
+module.exports = { scanSkills, getSkills, getSkill, getSkillBody, formatSkillsForPrompt, parseFrontmatter, upsertSkill }

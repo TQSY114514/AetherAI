@@ -126,6 +126,14 @@ AetherAI stands on the shoulders of these projects — their ideas shaped the ar
 
 ## 📋 Changelog
 
+### v0.1.23
+**Performance & reliability**
+- rAF-batched streaming: chunk updates accumulate and flush at most 60Hz (was per-token setState ~100+Hz)
+- Habit promotion O(1) in-memory index update (was O(skills) disk rescan)
+- Memoized search-highlight RegExp in MessageBubble
+- Strip `<script>` tags in markdown renderer (XSS defense)
+- Localized ErrorBoundary with dev-mode stack trace
+
 ### v0.1.22
 **Reliability & UX**
 - Credential rotation retry: 429 / 5xx / network → auto retry with next API key (up to 3 attempts) before falling back to another model

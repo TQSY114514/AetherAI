@@ -440,7 +440,10 @@ const translations: Record<string, Record<string, string>> = {
     "settings.skills.rescan": "Rescan",
     "settings.skills.rescanned": "Scanned — {0} skills loaded",
     "settings.skills.empty": "No skills found. Drop a folder named <skill>/SKILL.md into .claude/skills/ in your workspace.",
-    "settings.skills.hint": "Scan dirs (precedence): <workspace>/.claude/skills, <workspace>/.aetherai/skills, <userData>/skills, built-in. Only name+description enter the prompt; the body loads via use_skill."
+    "settings.skills.hint": "Scan dirs (precedence): <workspace>/.claude/skills, <workspace>/.aetherai/skills, <userData>/skills, built-in. Only name+description enter the prompt; the body loads via use_skill.",
+    "error.title": "Something went wrong",
+    "error.unknown": "An unexpected error occurred",
+    "error.retry": "Try again"
   },
   "en-upside": {
     "app.name": "ᴉɐɹǝɥʇǝɐ",
@@ -785,7 +788,10 @@ const translations: Record<string, Record<string, string>> = {
     "settings.skills.rescan": "uɐɔsǝɹ",
     "settings.skills.rescanned": "pǝpɐol sllᴉʞs }0{ — pǝuuɐɔs",
     "settings.skills.empty": ".ǝɔɐdsʞɹoʍ ɹnoʎ uᴉ /sllᴉʞs/ǝpnɐlɔ. oʇuᴉ pɯ.llᴉʞs/>llᴉʞs< pǝɯɐu ɹǝploɟ ɐ doɹp .punoɟ sllᴉʞs ou",
-    "settings.skills.hint": ".llᴉʞs_ǝsn ɐᴉʌ spɐol ʎpoq ǝɥʇ ;ʇdɯoɹd ǝɥʇ ɹǝʇuǝ uoᴉʇdᴉɹɔsǝp+ǝɯɐu ʎluo .uᴉ-ʇlᴉnq ,sllᴉʞs/>ɐʇɐpɹǝsn< ,sllᴉʞs/ᴉɐɹǝɥʇǝɐ./>ǝɔɐdsʞɹoʍ< ,sllᴉʞs/ǝpnɐlɔ./>ǝɔɐdsʞɹoʍ< :)ǝɔuǝpǝɔǝɹd( sɹᴉp uɐɔs"
+    "settings.skills.hint": ".llᴉʞs_ǝsn ɐᴉʌ spɐol ʎpoq ǝɥʇ ;ʇdɯoɹd ǝɥʇ ɹǝʇuǝ uoᴉʇdᴉɹɔsǝp+ǝɯɐu ʎluo .uᴉ-ʇlᴉnq ,sllᴉʞs/>ɐʇɐpɹǝsn< ,sllᴉʞs/ᴉɐɹǝɥʇǝɐ./>ǝɔɐdsʞɹoʍ< ,sllᴉʞs/ǝpnɐlɔ./>ǝɔɐdsʞɹoʍ< :)ǝɔuǝpǝɔǝɹd( sɹᴉp uɐɔs",
+    "error.title": "ƃuoɹʍ ʇuǝʍ ƃuᴉɥʇǝɯos",
+    "error.unknown": "pǝɹɹnɔɔo ɹoɹɹǝ pǝʇɔǝdxǝun uɐ",
+    "error.retry": "uᴉɐƃɐ ʎɹʇ"
   },
   "zh-CN": {
     "app.name": "AetherAI",
@@ -2800,11 +2806,7 @@ export function detectLang(): LangCode {
 
 export function t(key: string, ...args: (string | number)[]): string {
   const table = translations[currentLang] || translations["en"] || {}
-  // Fast path for English: skip the redundant second lookup since `table` is
-  // already the English table. This is the common case and saves one property
-  // access per call (significant — `t()` is called on every render for every
-  // text node in the app).
-  let s = currentLang === 'en' ? (table[key] ?? key) : (table[key] ?? translations["en"]?.[key] ?? key)
+  let s = table[key] ?? translations["en"]?.[key] ?? key
   if (args.length) {
     s = s.replace(/\{(\d+)\}/g, (_, i) => String(args[Number(i)] ?? ""))
   }

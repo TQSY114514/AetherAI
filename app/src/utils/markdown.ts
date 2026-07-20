@@ -122,6 +122,12 @@ export function renderMarkdown(text: string): string {
   t = t.replace(/\n/g, '<br>')
   t = blocks.length > 0 ? t : '<p>' + t + '</p>'
   blocks.forEach(({ ph, orig }) => { t = t.replace(ph, orig) })
+
+  // Strip any <script> tags (defense-in-depth against XSS from malicious LLM
+  // responses). The initial &/< escaping prevents injection via plain text, but
+  // block-level regex replacements could theoretically leave vectors open.
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<script[^>]*>/gi, '')
+
   _cacheText = text
   _cacheHtml = t
   return t
